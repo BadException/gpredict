@@ -48,6 +48,7 @@ struct _gtk_rig_ctrl {
     GtkWidget      *DevSel;     /*!< Device selector */
     GtkWidget      *DevSel2;    /*!< Second device selector */
     GtkWidget      *LockBut;
+    GtkWidget      *cycle_spin;      /*!< Update timer cycle */
 
     radio_conf_t   *conf;       /*!< Radio configuration */
     radio_conf_t   *conf2;      /*!< Secondary radio configuration */
@@ -70,11 +71,14 @@ struct _gtk_rig_ctrl {
     gboolean        engaged;    /*!< Flag indicating that rig device is engaged. */
     gint            errcnt;     /*!< Error counter. */
 
+    gboolean        lastrxptt;  /*!< PTT state of last rx cycle. */
+    gboolean        lasttxptt;  /*!< PTT state of last tx cycle. */
+
     gdouble         lastrxf;    /*!< Last frequency sent to receiver. */
     gdouble         lasttxf;    /*!< Last frequency sent to tranmitter. */
     gdouble         du, dd;     /*!< Last computed up/down Doppler shift; computed in update() */
 
-    glong           last_toggle_tx;     /*!< Last time when exec_toggle_tx_cycle() was executed (seconds)
+    gint64          last_toggle_tx;     /*!< Last time when exec_toggle_tx_cycle() was executed (seconds)
                                            -1 indicates that an update should be performed ASAP */
 
     gint            sock, sock2;        /*!< Sockets for controlling the radio(s). */

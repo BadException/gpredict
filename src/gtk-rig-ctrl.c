@@ -1,8 +1,9 @@
 /*
   Gpredict: Real-time satellite tracking and orbit prediction program
 
-  Copyright (C)  2001-2017  Alexandru Csete, OZ9AEC
+  Copyright (C)  2001-2019  Alexandru Csete, OZ9AEC
   Copyright (C)       2017  Patrick Dohmen, DL4PD
+  Copyright (C)       2018  Mario Haustein, DM5AHA
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -114,6 +115,7 @@ static void gtk_rig_ctrl_destroy(GtkWidget * widget)
 
     if (ctrl->conf != NULL)
     {
+        radio_conf_save(ctrl->conf);
         g_free(ctrl->conf->name);
         g_free(ctrl->conf->host);
         g_free(ctrl->conf);
@@ -136,17 +138,23 @@ static void gtk_rig_ctrl_destroy(GtkWidget * widget)
     (*GTK_WIDGET_CLASS(parent_class)->destroy) (widget);
 }
 
-static void gtk_rig_ctrl_class_init(GtkRigCtrlClass * class)
+static void gtk_rig_ctrl_class_init(GtkRigCtrlClass * class,
+				    gpointer class_data)
 {
     GtkWidgetClass *widget_class;
+
+    (void)class_data;
 
     widget_class = (GtkWidgetClass *) class;
     parent_class = g_type_class_peek_parent(class);
     widget_class->destroy = gtk_rig_ctrl_destroy;
 }
 
-static void gtk_rig_ctrl_init(GtkRigCtrl * ctrl)
+static void gtk_rig_ctrl_init(GtkRigCtrl * ctrl,
+			      gpointer g_class)
 {
+    (void)g_class;
+
     ctrl->sats = NULL;
     ctrl->target = NULL;
     ctrl->pass = NULL;
@@ -165,6 +173,8 @@ static void gtk_rig_ctrl_init(GtkRigCtrl * ctrl)
     ctrl->delay = 1000;
     ctrl->timerid = 0;
     ctrl->errcnt = 0;
+    ctrl->lastrxptt = FALSE;
+    ctrl->lasttxptt = TRUE;
     ctrl->lastrxf = 0.0;
     ctrl->lasttxf = 0.0;
     ctrl->last_toggle_tx = -1;
@@ -407,6 +417,7 @@ void gtk_rig_ctrl_select_sat(GtkRigCtrl * ctrl, gint catnum)
 static void downlink_changed_cb(GtkFreqKnob * knob, gpointer data)
 {
     GtkRigCtrl     *ctrl = GTK_RIG_CTRL(data);
+
     (void)knob;
 
     if (ctrl->trsplock)
@@ -794,6 +805,8 @@ static void delay_changed_cb(GtkSpinButton * spin, gpointer data)
     GtkRigCtrl     *ctrl = GTK_RIG_CTRL(data);
 
     ctrl->delay = (guint) gtk_spin_button_get_value(spin);
+    if (ctrl->conf)
+        ctrl->conf->cycle = ctrl->delay;
 
     if (ctrl->engaged)
         start_timer(ctrl);
@@ -831,6 +844,10 @@ static void primary_rig_selected_cb(GtkComboBox * box, gpointer data)
         sat_log_log(SAT_LOG_LEVEL_INFO,
                     _("%s:%s: Loaded new radio configuration %s"),
                     __FILE__, __func__, ctrl->conf->name);
+
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(ctrl->cycle_spin),
+                                  ctrl->conf->cycle);
+
         /* update LO widgets */
         buff = g_strdup_printf(_("%.0f MHz"), ctrl->conf->lo / 1.0e6);
         gtk_label_set_text(GTK_LABEL(ctrl->LoDown), buff);
@@ -1174,7 +1191,7 @@ static gint rig_name_compare(const gchar * a, const gchar * b)
 
 static GtkWidget *create_conf_widgets(GtkRigCtrl * ctrl)
 {
-    GtkWidget      *frame, *table, *label, *timer;
+    GtkWidget      *frame, *table, *label;
     GDir           *dir = NULL; /* directory handle */
     GError         *error = NULL;       /* error flag and info */
     gchar          *dirname;    /* directory name */
@@ -1248,7 +1265,6 @@ static GtkWidget *create_conf_widgets(GtkRigCtrl * ctrl)
     g_signal_connect(ctrl->DevSel, "changed",
                      G_CALLBACK(primary_rig_selected_cb), ctrl);
     gtk_grid_attach(GTK_GRID(table), ctrl->DevSel, 1, 0, 1, 1);
-    /* config will be force-loaded after LO spin is created */
 
     /* Secondary device */
     label = gtk_label_new(_("2. Device:"));
@@ -1307,23 +1323,19 @@ static GtkWidget *create_conf_widgets(GtkRigCtrl * ctrl)
                      ctrl);
     gtk_grid_attach(GTK_GRID(table), ctrl->LockBut, 2, 0, 1, 1);
 
-    /* Now, load config */
-    primary_rig_selected_cb(GTK_COMBO_BOX(ctrl->DevSel), ctrl);
-
-    /* Timeout */
+    /* cycle period */
     label = gtk_label_new(_("Cycle:"));
     g_object_set(label, "xalign", 1.0f, "yalign", 0.5f, NULL);
     gtk_grid_attach(GTK_GRID(table), label, 0, 3, 1, 1);
 
-    timer = gtk_spin_button_new_with_range(100, 5000, 10);
-    gtk_spin_button_set_digits(GTK_SPIN_BUTTON(timer), 0);
-    gtk_widget_set_tooltip_text(timer,
+    ctrl->cycle_spin = gtk_spin_button_new_with_range(10, 10000, 10);
+    gtk_spin_button_set_digits(GTK_SPIN_BUTTON(ctrl->cycle_spin), 0);
+    gtk_widget_set_tooltip_text(ctrl->cycle_spin,
                                 _("This parameter controls the delay between "
                                   "commands sent to the rig."));
-    gtk_spin_button_set_value(GTK_SPIN_BUTTON(timer), ctrl->delay);
-    g_signal_connect(timer, "value-changed", G_CALLBACK(delay_changed_cb),
-                     ctrl);
-    gtk_grid_attach(GTK_GRID(table), timer, 1, 3, 1, 1);
+    g_signal_connect(ctrl->cycle_spin, "value-changed",
+                     G_CALLBACK(delay_changed_cb), ctrl);
+    gtk_grid_attach(GTK_GRID(table), ctrl->cycle_spin, 1, 3, 1, 1);
 
     label = gtk_label_new(_("msec"));
     g_object_set(label, "xalign", 0.0f, "yalign", 0.5f, NULL);
@@ -1331,6 +1343,9 @@ static GtkWidget *create_conf_widgets(GtkRigCtrl * ctrl)
 
     frame = gtk_frame_new(_("Settings"));
     gtk_container_add(GTK_CONTAINER(frame), table);
+
+    /* load primary config */
+    primary_rig_selected_cb(GTK_COMBO_BOX(ctrl->DevSel), ctrl);
 
     return frame;
 }
@@ -1368,22 +1383,17 @@ static void store_sats(gpointer key, gpointer value, gpointer user_data)
     (void)key;
 
     ctrl->sats = g_slist_insert_sorted(ctrl->sats, sat,
-                                      (GCompareFunc) sat_name_compare);
+                                       (GCompareFunc) sat_name_compare);
 }
 
-static gboolean _send_rigctld_command(GtkRigCtrl * ctrl, gint sock, gchar * buff,
-                                      gchar * buffout, gint sizeout)
+static gboolean _send_rigctld_command(GtkRigCtrl * ctrl, gint sock,
+                                      gchar * buff, gchar * buffout,
+                                      gint sizeout)
 {
     gint            written;
     gint            size;
 
-    /* added by Marcel Cimander; win32 newline -> \10\13 */
-#ifdef WIN32
-    size = strlen(buff) - 1;
-    /* added by Marcel Cimander; unix newline -> \10 (apple -> \13) */
-#else
     size = strlen(buff);
-#endif
 
     sat_log_log(SAT_LOG_LEVEL_DEBUG,
                 _("%s:%s: sending %d bytes to rigctld as \"%s\""),
@@ -1427,10 +1437,11 @@ static gboolean _send_rigctld_command(GtkRigCtrl * ctrl, gint sock, gchar * buff
     return TRUE;
 }
 
-static gboolean send_rigctld_command(GtkRigCtrl * ctrl, gint sock, gchar * buff,
-                                      gchar * buffout, gint sizeout)
+static gboolean send_rigctld_command(GtkRigCtrl * ctrl, gint sock,
+                                     gchar * buff, gchar * buffout,
+                                     gint sizeout)
 {
-    gboolean retval;
+    gboolean        retval;
 
     /* Enter critical section! */
     g_mutex_lock(&ctrl->writelock);
@@ -1545,7 +1556,6 @@ static void exec_rx_cycle(GtkRigCtrl * ctrl)
 {
     gdouble         readfreq = 0.0, tmpfreq, satfreqd, satfrequ;
     gboolean        ptt = FALSE;
-    gboolean        dialchanged = FALSE;
 
     /* get PTT status */
     if (ctrl->engaged && ctrl->conf->ptt)
@@ -1559,26 +1569,15 @@ static void exec_rx_cycle(GtkRigCtrl * ctrl)
        Note: If ctrl->lastrxf = 0.0 the sync has been invalidated (e.g. user pressed "tune")
        and no need to execute the dial feedback.
      */
-    if ((ctrl->engaged) && (ctrl->lastrxf > 0.0))
+    if ((ctrl->engaged) && (ctrl->lastrxf > 0.0) && (ptt == FALSE))
     {
-        if (ptt == FALSE)
+        if (!get_freq_simplex(ctrl, ctrl->sock, &readfreq))
         {
-            if (!get_freq_simplex(ctrl, ctrl->sock, &readfreq))
-            {
-                /* error => use a passive value */
-                readfreq = ctrl->lastrxf;
-                ctrl->errcnt++;
-            }
+            /* error => use a passive value */
+            ctrl->errcnt++;
         }
-        else
+        else if (fabs(readfreq - ctrl->lastrxf) >= 1.0)
         {
-            readfreq = ctrl->lastrxf;
-        }
-
-        if (fabs(readfreq - ctrl->lastrxf) >= 1.0)
-        {
-            dialchanged = TRUE;
-
             /* user might have altered radio frequency => update transponder knob */
             gtk_freq_knob_set_value(GTK_FREQ_KNOB(ctrl->RigFreqDown),
                                     readfreq);
@@ -1601,15 +1600,13 @@ static void exec_rx_cycle(GtkRigCtrl * ctrl)
             {
                 track_downlink(ctrl);
             }
+
+            /* no need to forward track */
+            return;
         }
     }
 
     /* now, forward tracking */
-    if (dialchanged)
-    {
-        /* no need to forward track */
-        return;
-    }
 
     /* If we are tracking, calculate the radio freq by applying both dopper shift
        and tranverter LO frequency. If we are not tracking, apply only LO frequency.
@@ -1653,19 +1650,35 @@ static void exec_rx_cycle(GtkRigCtrl * ctrl)
                frequency from the rig. */
             get_freq_simplex(ctrl, ctrl->sock, &tmpfreq);
             ctrl->lastrxf = tmpfreq;
+
+            /* This is only effective in RIG_TYPE_TRX mode.
+               Invalidate ctrl->lasttxf for two reasons.
+
+               1. Prevent dial feedback from changing the uplink frequency.
+               In the first TX cycle get_freq_simplex() returns the downlink
+               frequency instead of uplink. The mismatch would thus trigger
+               an uplink update as long as the VFO has not been updated.
+               2. Force updating the VFO in the first TX cycle.
+             */
+            if (ctrl->lastrxptt != ptt)
+                ctrl->lasttxf = 0.0;
         }
         else
         {
             ctrl->errcnt++;
         }
     }
+
+    /* Remember PTT state, to avoid misinterpreting VFO changes as dial
+       feedback during TX to RX transitions.
+     */
+    ctrl->lastrxptt = ptt;
 }
 
 static void exec_tx_cycle(GtkRigCtrl * ctrl)
 {
     gdouble         readfreq = 0.0, tmpfreq, satfreqd, satfrequ;
     gboolean        ptt = TRUE;
-    gboolean        dialchanged = FALSE;
 
     /* get PTT status */
     if (ctrl->engaged && ctrl->conf->ptt)
@@ -1681,26 +1694,15 @@ static void exec_tx_cycle(GtkRigCtrl * ctrl)
        Note: If ctrl->lasttxf = 0.0 the sync has been invalidated (e.g. user pressed "tune")
        and no need to execute the dial feedback.
      */
-    if ((ctrl->engaged) && (ctrl->lasttxf > 0.0))
+    if ((ctrl->engaged) && (ctrl->lasttxf > 0.0) && (ptt == TRUE))
     {
-        if (ptt == TRUE)
+        if (!get_freq_simplex(ctrl, ctrl->sock, &readfreq))
         {
-            if (!get_freq_simplex(ctrl, ctrl->sock, &readfreq))
-            {
-                /* error => use a passive value */
-                readfreq = ctrl->lasttxf;
-                ctrl->errcnt++;
-            }
+            /* error => use a passive value */
+            ctrl->errcnt++;
         }
-        else
+        else if (fabs(readfreq - ctrl->lasttxf) >= 1.0)
         {
-            readfreq = ctrl->lasttxf;
-        }
-
-        if (fabs(readfreq - ctrl->lasttxf) >= 1.0)
-        {
-            dialchanged = TRUE;
-
             /* user might have altered radio frequency => update transponder knob */
             gtk_freq_knob_set_value(GTK_FREQ_KNOB(ctrl->RigFreqUp), readfreq);
             ctrl->lasttxf = readfreq;
@@ -1721,15 +1723,13 @@ static void exec_tx_cycle(GtkRigCtrl * ctrl)
             {
                 track_uplink(ctrl);
             }
+
+            /* no need to forward track */
+            return;
         }
     }
 
     /* now, forward tracking */
-    if (dialchanged)
-    {
-        /* no need to forward track */
-        return;
-    }
 
     /* If we are tracking, calculate the radio freq by applying both dopper shift
        and tranverter LO frequency. If we are not tracking, apply only LO frequency.
@@ -1773,12 +1773,30 @@ static void exec_tx_cycle(GtkRigCtrl * ctrl)
                frequency from the rig. */
             get_freq_simplex(ctrl, ctrl->sock, &tmpfreq);
             ctrl->lasttxf = tmpfreq;
+
+            /* This is only effective in RIG_TYPE_TRX mode.
+               Invalidate ctrl->lastrxf for two reasons.
+
+               1. Prevent dial feedback from changing the downlink frequency.
+               In the first RX cycle get_freq_simplex() returns the uplink
+               frequency instead of downlink. The mismatch would thus
+               trigger a downlink update as long as the VFO has not been
+               updated.
+               2. Force updating the VFO in the first RX cycle.
+             */
+            if (ctrl->lasttxptt != ptt)
+                ctrl->lastrxf = 0.0;
         }
         else
         {
             ctrl->errcnt++;
         }
     }
+
+    /* Remember PTT state, to avoid misinterpreting VFO changes as dial
+       feedback during RX to TX transitions.
+     */
+    ctrl->lasttxptt = ptt;
 }
 
 static void exec_trx_cycle(GtkRigCtrl * ctrl)
@@ -1797,19 +1815,19 @@ static void exec_toggle_cycle(GtkRigCtrl * ctrl)
      */
     if (ctrl->conf->type == RIG_TYPE_TOGGLE_AUTO)
     {
-        GTimeVal        current_time;
+	gint64          current_time;
 
         /* get the current time */
-        g_get_current_time(&current_time);
+	current_time = g_get_real_time() / G_USEC_PER_SEC;
 
         if ((ctrl->last_toggle_tx == -1) ||
-            ((current_time.tv_sec - ctrl->last_toggle_tx) >= 10))
+            ((current_time - ctrl->last_toggle_tx) >= 10))
         {
             /* it's time to update TX freq */
             exec_toggle_tx_cycle(ctrl);
 
             /* store current time */
-            ctrl->last_toggle_tx = current_time.tv_sec;
+            ctrl->last_toggle_tx = current_time;
         }
     }
 }
@@ -2682,6 +2700,8 @@ static void rigctrl_close(GtkRigCtrl * data)
 {
     GtkRigCtrl     *ctrl = GTK_RIG_CTRL(data);
 
+    ctrl->lastrxptt = FALSE;
+    ctrl->lasttxptt = TRUE;
     ctrl->lasttxf = 0.0;
     ctrl->lastrxf = 0.0;
 
@@ -2942,8 +2962,7 @@ GtkWidget      *gtk_rig_ctrl_new(GtkSatModule * module)
                     1, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(table), create_target_widgets(rigctrl),
                     0, 1, 1, 1);
-    gtk_grid_attach(GTK_GRID(table), create_conf_widgets(rigctrl),
-                    1, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(table), create_conf_widgets(rigctrl), 1, 1, 1, 1);
     gtk_grid_attach(GTK_GRID(table), create_count_down_widgets(rigctrl),
                     0, 2, 2, 1);
 
